@@ -4,14 +4,10 @@ import { handleWebhook, verifyWebhook } from './bot';
 
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: false })); // Twilio sends urlencoded
 
-// Verificación del webhook (GET) — Meta lo llama al configurar
 app.get('/webhook', verifyWebhook);
-
-// Mensajes entrantes (POST) — Meta lo llama con cada mensaje
 app.post('/webhook', handleWebhook);
-
-// Health check
 app.get('/health', (_req, res) => res.json({ status: 'ok', ts: new Date().toISOString() }));
 
 const PORT = parseInt(process.env.PORT ?? '3000', 10);

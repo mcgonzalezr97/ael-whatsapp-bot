@@ -4,7 +4,7 @@ import {
   lookupUser, calculatePlanilla, fmt, formatPlanillaMsg,
   currentPeriod, parsePeriod, mockPaymentLink, mockRadicado, SMLMV,
 } from './ael';
-import { sendMessage, extractMessage, markAsRead } from './whatsapp';
+import { sendMessage, extractMessage } from './whatsapp';
 import { getAIResponse } from './ai';
 
 // ─── Sesiones en memoria (→ Redis en producción) ───────────────────────────
@@ -328,7 +328,7 @@ export async function handleWebhook(req: Request, res: Response): Promise<void> 
   if (!msg) return;
 
   const s = session(msg.from);
-  await markAsRead(msg.messageId);
+  
 
   try {
     const reply = await processMsg(s, msg.text);
