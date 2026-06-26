@@ -65,12 +65,12 @@ export async function procesarPlanilla(income: number, period: Period): Promise<
     console.log('[Scraper] Navegando al login...');
     await page.goto(`${BASE}/Home.aspx`, { waitUntil: 'domcontentloaded', timeout: 30_000 });
     await page.locator('input[placeholder*="documento"]').fill(cedula);
-    await page.locator('button:has-text("Continuar")').first().click();
+    await page.locator('button:has-text("Continuar"), a:has-text("Continuar"), input[value*="Continuar"]').first().click();
 
     // ── Login paso 2: contraseña ──────────────────────────────────────────
     await page.locator('input[type="password"]').waitFor({ timeout: 10_000 });
     await page.locator('input[type="password"]').fill(password);
-    await page.locator('button:has-text("Continuar")').first().click();
+    await page.locator('button:has-text("Continuar"), a:has-text("Continuar"), input[value*="Continuar"]').first().click();
 
     // ── Dashboard ─────────────────────────────────────────────────────────
     await page.waitForURL('**dashboard**', { timeout: 20_000 });
