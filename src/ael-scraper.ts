@@ -73,7 +73,7 @@ export async function procesarPlanilla(income: number, period: Period): Promise<
     await page.locator('button:has-text("Continuar"), a:has-text("Continuar"), input[value*="Continuar"]').first().click();
 
     // ── Dashboard ─────────────────────────────────────────────────────────
-    await page.waitForURL('**dashboard**', { timeout: 20_000 });
+    await page.waitForURL(/Dashboard/i, { timeout: 20_000 });
     console.log('[Scraper] Dashboard cargado');
     await page.waitForTimeout(2_000);
 
