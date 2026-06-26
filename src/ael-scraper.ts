@@ -1,4 +1,4 @@
-import { chromium } from 'playwright';
+import { chromium, Browser } from 'playwright';
 import { Period } from './types';
 
 const BASE = 'https://independientes.aportesenlinea.com/Portal/Paginas';
@@ -7,14 +7,7 @@ export interface ScrapeResult {
   ok: boolean;
   period: string;
   income: number;
-  desglose?: {
-    ibc: number;
-    salud: number;
-    pension: number;
-    arl: number;
-    ccf: number;
-    total: number;
-  };
+  desglose?: { ibc: number; salud: number; pension: number; arl: number; ccf: number; total: number };
   pseLink?: string;
   error?: string;
 }
@@ -48,30 +41,33 @@ export function formatResultMsg(r: ScrapeResult): string {
   );
 }
 
-export async function procesarPlanilla(
-  income: number,
-  period: Period
-): Promise<ScrapeResult> {
-  const cedula   = process.env.AEL_CEDULA!;
-  const password = process.env.AEL_PASSWORD!;
+export async function procesarPlanilla(income: number, period: Period): Promise<ScrapeResult> {
+  const cedula   = process.env.AEL_CEDULA ?? '';
+  const password = process.env.AEL_PASSWORD ?? '';
 
-  const browser = await chromium.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-  });
+  if (!cedula || !password) {
+    return { ok: false, period: period.display, income, error: 'Credenciales AeL no configuradas (AEL_CEDULA / AEL_PASSWORD)' };
+  }
 
-  const ctx  = await browser.newContext({ locale: 'es-CO' });
-  const page = await ctx.newPage();
+  let browser: Browser | null = null;
 
   try {
-    console.log('[Scraper] Iniciando login...');
+    console.log('[Scraper] Lanzando Chromium...');
+    browser = await chromium.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--single-process'],
+    });
 
-    // ── Paso 1: cédula ────────────────────────────────────────────────────
+    const ctx  = await browser.newContext({ locale: 'es-CO' });
+    const page = await ctx.newPage();
+
+    // ── Login paso 1: cédula ──────────────────────────────────────────────
+    console.log('[Scraper] Navegando al login...');
     await page.goto(`${BASE}/Home.aspx`, { waitUntil: 'domcontentloaded', timeout: 30_000 });
     await page.locator('input[placeholder*="documento"]').fill(cedula);
     await page.locator('button:has-text("Continuar")').first().click();
 
-    // ── Paso 2: contraseña ────────────────────────────────────────────────
+    // ── Login paso 2: contraseña ──────────────────────────────────────────
     await page.locator('input[type="password"]').waitFor({ timeout: 10_000 });
     await page.locator('input[type="password"]').fill(password);
     await page.locator('button:has-text("Continuar")').first().click();
@@ -81,27 +77,20 @@ export async function procesarPlanilla(
     console.log('[Scraper] Dashboard cargado');
     await page.waitForTimeout(2_000);
 
-    // ── Detectar y corregir estado "Retirado" ─────────────────────────────
+    // ── Corregir estado "Retirado" si aplica ──────────────────────────────
     const retirado = await page.locator('text=TE ENCUENTRAS RETIRADO').count();
     if (retirado > 0) {
-      console.log('[Scraper] Estado retirado detectado — corrigiendo mes...');
-
-      // Cambiar la fecha de inicio al primer día del mes actual
+      console.log('[Scraper] Estado retirado — corrigiendo mes...');
       const today = new Date();
       const firstDay = `${today.getFullYear()}/${String(today.getMonth() + 1).padStart(2, '0')}/01`;
-
-      // Limpiar el input de fecha y escribir la nueva fecha
       const dateInput = page.locator('input').last();
       await dateInput.clear();
       await dateInput.fill(firstDay);
-      await page.waitForTimeout(500);
-
+      await page.waitForTimeout(300);
       await page.locator('button:has-text("Cambiar")').first().click();
-      console.log('[Scraper] Mes corregido, esperando recálculo...');
       await page.waitForTimeout(4_000);
     }
 
-    // Esperar que el total se calcule
     await page.locator('text=TOTAL A PAGAR').waitFor({ timeout: 15_000 });
     console.log('[Scraper] Total calculado');
 
@@ -116,15 +105,13 @@ export async function procesarPlanilla(
     const count = await editarBtns.count();
     await editarBtns.nth(count - 1).click();
     console.log('[Scraper] Editar ingresos clickeado');
-
     await page.waitForTimeout(1_500);
 
     // ── Ingresar monto ────────────────────────────────────────────────────
     const inputSelectors = [
       'input[type="number"]:visible',
-      'input[placeholder*="ingreso"]:visible',
-      'input[placeholder*="Ingreso"]:visible',
-      'input[placeholder*="valor"]:visible',
+      'input[placeholder*="ngreso"]:visible',
+      'input[placeholder*="alor"]:visible',
       'input[type="text"]:visible',
     ];
 
@@ -135,32 +122,19 @@ export async function procesarPlanilla(
         await inp.selectText();
         await inp.fill(income.toString());
         filled = true;
-        console.log(`[Scraper] Ingreso llenado con selector: ${sel}`);
+        console.log(`[Scraper] Ingreso llenado: ${sel}`);
         break;
       }
     }
+    if (!filled) throw new Error('No se encontró el campo de ingresos tras hacer clic en Editar');
 
-    if (!filled) throw new Error('No se encontró el campo de ingresos');
-
-    // Guardar / Calcular
-    const saveBtns = [
-      'button:has-text("Guardar")',
-      'button:has-text("Calcular")',
-      'button:has-text("Actualizar")',
-      'button:has-text("Aceptar")',
-      'input[type="submit"]',
-    ];
-
-    let saved = false;
-    for (const sel of saveBtns) {
+    // Guardar
+    for (const sel of ['button:has-text("Guardar")', 'button:has-text("Calcular")', 'button:has-text("Actualizar")', 'input[type="submit"]']) {
       if (await page.locator(sel).count() > 0) {
         await page.locator(sel).first().click();
-        saved = true;
         break;
       }
     }
-    if (!saved) await page.keyboard.press('Enter');
-
     await page.waitForTimeout(2_500);
     console.log('[Scraper] Ingresos guardados');
 
@@ -168,11 +142,8 @@ export async function procesarPlanilla(
     async function readAmount(label: string): Promise<number> {
       try {
         const row = page.locator(`text=${label}`).first().locator('..');
-        const text = await row.textContent();
-        return parseMoney(text);
-      } catch {
-        return 0;
-      }
+        return parseMoney(await row.textContent());
+      } catch { return 0; }
     }
 
     const ibc     = await readAmount('Base de cotización');
@@ -181,12 +152,10 @@ export async function procesarPlanilla(
     const arl     = await readAmount('Riesgos Laborales');
     const ccf     = await readAmount('Caja de Compensación');
     const total   = await readAmount('Total a pagar');
+    console.log('[Scraper] Desglose:', { ibc, salud, pension, arl, ccf, total });
 
-    console.log('[Scraper] Desglose leído:', { ibc, salud, pension, arl, ccf, total });
-
-    // ── Clic en Pago electrónico → capturar link PSE ──────────────────────
+    // ── Pago electrónico → capturar PSE ───────────────────────────────────
     let pseLink = '';
-
     const newPagePromise = ctx.waitForEvent('page', { timeout: 12_000 }).catch(() => null);
     await page.locator('text=Pago electrónico').first().click();
 
@@ -194,25 +163,18 @@ export async function procesarPlanilla(
     if (newTab) {
       await newTab.waitForLoadState('domcontentloaded', { timeout: 15_000 });
       pseLink = newTab.url();
-      console.log('[Scraper] PSE link (nueva pestaña):', pseLink);
     } else {
       await page.waitForTimeout(3_000);
       pseLink = page.url();
-      console.log('[Scraper] PSE link (misma pestaña):', pseLink);
     }
+    console.log('[Scraper] PSE link:', pseLink);
 
     return { ok: true, period: period.display, income, desglose: { ibc, salud, pension, arl, ccf, total }, pseLink };
 
   } catch (err) {
-    console.error('[Scraper] Error:', err);
-    await page.screenshot({ path: '/tmp/ael-error.png', fullPage: true }).catch(() => {});
-    return {
-      ok: false,
-      period: period.display,
-      income,
-      error: err instanceof Error ? err.message : 'Error desconocido en la plataforma de AeL',
-    };
+    console.error('[Scraper] Error:', err instanceof Error ? err.message : err);
+    return { ok: false, period: period.display, income, error: err instanceof Error ? err.message : 'Error desconocido' };
   } finally {
-    await browser.close();
+    if (browser) await browser.close();
   }
 }
