@@ -79,9 +79,31 @@ export async function procesarPlanilla(
     // ── Dashboard ─────────────────────────────────────────────────────────
     await page.waitForURL('**dashboard**', { timeout: 20_000 });
     console.log('[Scraper] Dashboard cargado');
+    await page.waitForTimeout(2_000);
+
+    // ── Detectar y corregir estado "Retirado" ─────────────────────────────
+    const retirado = await page.locator('text=TE ENCUENTRAS RETIRADO').count();
+    if (retirado > 0) {
+      console.log('[Scraper] Estado retirado detectado — corrigiendo mes...');
+
+      // Cambiar la fecha de inicio al primer día del mes actual
+      const today = new Date();
+      const firstDay = `${today.getFullYear()}/${String(today.getMonth() + 1).padStart(2, '0')}/01`;
+
+      // Limpiar el input de fecha y escribir la nueva fecha
+      const dateInput = page.locator('input').last();
+      await dateInput.clear();
+      await dateInput.fill(firstDay);
+      await page.waitForTimeout(500);
+
+      await page.locator('button:has-text("Cambiar")').first().click();
+      console.log('[Scraper] Mes corregido, esperando recálculo...');
+      await page.waitForTimeout(4_000);
+    }
 
     // Esperar que el total se calcule
-    await page.locator('text=TOTAL A PAGAR').waitFor({ timeout: 10_000 });
+    await page.locator('text=TOTAL A PAGAR').waitFor({ timeout: 15_000 });
+    console.log('[Scraper] Total calculado');
 
     // ── Clic en Pagar ─────────────────────────────────────────────────────
     await page.locator('text=Pagar').first().click();
@@ -89,7 +111,6 @@ export async function procesarPlanilla(
     console.log('[Scraper] Página de liquidación cargada');
 
     // ── Editar ingresos ───────────────────────────────────────────────────
-    // El último botón Editar corresponde a la sección Pagos
     await page.locator('text=Ingresos').first().waitFor({ timeout: 8_000 });
     const editarBtns = page.locator('a:has-text("Editar"), button:has-text("Editar")');
     const count = await editarBtns.count();
@@ -99,7 +120,6 @@ export async function procesarPlanilla(
     await page.waitForTimeout(1_500);
 
     // ── Ingresar monto ────────────────────────────────────────────────────
-    // Buscar el campo de ingresos — puede ser type number o text visible
     const inputSelectors = [
       'input[type="number"]:visible',
       'input[placeholder*="ingreso"]:visible',
@@ -112,9 +132,8 @@ export async function procesarPlanilla(
     for (const sel of inputSelectors) {
       const inp = page.locator(sel).first();
       if (await inp.count() > 0) {
-         // select all
         await inp.selectText();
-      await inp.fill(income.toString());
+        await inp.fill(income.toString());
         filled = true;
         console.log(`[Scraper] Ingreso llenado con selector: ${sel}`);
         break;
@@ -168,7 +187,6 @@ export async function procesarPlanilla(
     // ── Clic en Pago electrónico → capturar link PSE ──────────────────────
     let pseLink = '';
 
-    // Escuchar nueva pestaña
     const newPagePromise = ctx.waitForEvent('page', { timeout: 12_000 }).catch(() => null);
     await page.locator('text=Pago electrónico').first().click();
 
