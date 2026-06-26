@@ -81,13 +81,20 @@ export async function procesarPlanilla(income: number, period: Period): Promise<
     const retirado = await page.locator('text=TE ENCUENTRAS RETIRADO').count();
     if (retirado > 0) {
       console.log('[Scraper] Estado retirado — corrigiendo mes...');
-      const today = new Date();
-      const firstDay = `${today.getFullYear()}/${String(today.getMonth() + 1).padStart(2, '0')}/01`;
-      const dateInput = page.locator('input').last();
-      await dateInput.clear();
-      await dateInput.fill(firstDay);
-      await page.waitForTimeout(300);
-      await page.locator('button:has-text("Cambiar")').first().click();
+      // El calendar picker ya muestra el mes actual — solo confirmar
+      // 1. Clic en el ícono del calendario para abrir el picker
+      await page.locator('img[src*="cal"], .ui-datepicker-trigger, [id*="calendar"], [id*="Calendar"]').first().click().catch(async () => {
+        // Fallback: clic en el ícono de calendario junto al campo de fecha
+        await page.locator('input:near(:text("Nueva fecha de ingreso")) + img, input:near(:text("Nueva fecha")) ~ img').first().click();
+      });
+      await page.waitForTimeout(1_000);
+
+      // 2. Clic en "Seleccionar" en el popup del calendario
+      await page.locator('button:has-text("Seleccionar"), input[value="Seleccionar"]').first().click();
+      await page.waitForTimeout(500);
+
+      // 3. Clic en "Cambiar" para confirmar la nueva fecha
+      await page.locator('button:has-text("Cambiar"), input[value="Cambiar"]').first().click();
       await page.waitForTimeout(4_000);
     }
 
