@@ -7,6 +7,7 @@ export type FlowStep =
   | 'AWAITING_CONFIRM_PLANILLA'
   | 'AWAITING_PAYMENT_METHOD'
   | 'AWAITING_PAYMENT_CONFIRM'
+  | 'PROCESSING'
   | 'DONE';
 
 export interface Period {

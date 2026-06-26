@@ -4,7 +4,7 @@ import { handleWebhook, verifyWebhook } from './bot';
 
 const app = express();
 app.use(express.json());
-app.use(express.urlencoded({ extended: false })); // Twilio sends urlencoded
+app.use(express.urlencoded({ extended: false })); // Twilio envía form-encoded
 
 app.get('/webhook', verifyWebhook);
 app.post('/webhook', handleWebhook);
