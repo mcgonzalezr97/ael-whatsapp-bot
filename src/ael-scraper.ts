@@ -3,6 +3,9 @@ import { Period } from './types';
 
 const BASE = 'https://independientes.aportesenlinea.com/Portal/Paginas';
 
+const MES_ABR = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+const MES_FULL = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
+
 export interface ScrapeResult {
   ok: boolean;
   period: string;
@@ -39,6 +42,63 @@ export function formatResultMsg(r: ScrapeResult): string {
     `Link de pago PSE:\n${r.pseLink}\n\n` +
     `_Válido por 15 minutos. Completa el pago en tu banco._`
   );
+}
+
+/**
+ * Abre el selector "Selecciona el mes que quieres pagar" y fuerza el
+ * mes/año exactos del periodo solicitado. Antes el código asumía que el
+ * mes cargado por defecto ya era el correcto (y solo reaccionaba si veía
+ * "TE ENCUENTRAS RETIRADO"), pero en la práctica el dashboard puede cargar
+ * por defecto un mes distinto al pedido — incluso uno que ya está en
+ * "ERROR CALCULANDO TUS APORTES" — así que ahora seleccionamos siempre.
+ */
+async function seleccionarPeriodo(page: Page, period: Period): Promise<void> {
+  console.log(`[Scraper] Seleccionando periodo: ${MES_ABR[period.monthNum - 1]} ${period.year}`);
+
+  // Abrir el popup del selector (ícono de calendario o el texto del mes actual)
+  const abrirSelector = page.locator(
+    'img[src*="cal"], .ui-datepicker-trigger, [id*="calendar"], [id*="Calendar"]'
+  ).first();
+  await abrirSelector.click().catch(async () => {
+    await page.locator('text=Selecciona el mes que quieres pagar').first().click();
+  });
+
+  await page.locator('text=Selecciona el año y el mes').waitFor({ timeout: 8_000 });
+
+  const selects = page.locator('select');
+  const monthSelect = selects.nth(0);
+  const yearSelect = selects.nth(1);
+
+  // Mes: probar abreviatura ("Jul"), luego nombre completo ("Julio"), luego por índice
+  let monthSet = false;
+  for (const label of [MES_ABR[period.monthNum - 1], MES_FULL[period.monthNum - 1]]) {
+    try {
+      await monthSelect.selectOption({ label });
+      monthSet = true;
+      break;
+    } catch { /* probar siguiente formato */ }
+  }
+  if (!monthSet) {
+    await monthSelect.selectOption({ index: period.monthNum - 1 });
+  }
+
+  // Año: probar por label, luego por value
+  try {
+    await yearSelect.selectOption({ label: String(period.year) });
+  } catch {
+    await yearSelect.selectOption({ value: String(period.year) });
+  }
+
+  await page.locator('button:has-text("Seleccionar"), input[value="Seleccionar"]').first().click();
+  await page.waitForTimeout(1_500);
+
+  // Algunos flujos (ej. "retirado") muestran un botón "Cambiar" para confirmar
+  const cambiarBtn = page.locator('button:has-text("Cambiar"), input[value="Cambiar"]');
+  if (await cambiarBtn.count() > 0) {
+    console.log('[Scraper] Confirmando cambio de periodo con "Cambiar"');
+    await cambiarBtn.first().click();
+    await page.waitForTimeout(3_000);
+  }
 }
 
 /**
@@ -95,9 +155,6 @@ export async function procesarPlanilla(income: number, period: Period): Promise<
     page = await ctx.newPage();
 
     // ── Auto-aceptar cualquier confirm()/alert() del portal ────────────────
-    // Sin este listener, Playwright descarta (cancela) los diálogos por
-    // defecto, lo que puede bloquear silenciosamente cualquier navegación
-    // que dependa de un "¿Deseas continuar?" tipo confirm().
     ctx.on('page', (p) => {
       p.on('dialog', async (dialog) => {
         console.log(`[Scraper] Dialog (${dialog.type()}): ${dialog.message()}`);
@@ -125,26 +182,13 @@ export async function procesarPlanilla(income: number, period: Period): Promise<
     console.log('[Scraper] Dashboard cargado');
     await page.waitForTimeout(2_000);
 
-    // ── Corregir estado "Retirado" si aplica ──────────────────────────────
-    const retirado = await page.locator('text=TE ENCUENTRAS RETIRADO').count();
-    if (retirado > 0) {
-      console.log('[Scraper] Estado retirado — corrigiendo mes...');
-      await page.locator('img[src*="cal"], .ui-datepicker-trigger, [id*="calendar"], [id*="Calendar"]').first().click().catch(async () => {
-        await page.locator('input:near(:text("Nueva fecha de ingreso")) + img, input:near(:text("Nueva fecha")) ~ img').first().click();
-      });
-      await page.waitForTimeout(1_000);
-      await page.locator('button:has-text("Seleccionar"), input[value="Seleccionar"]').first().click();
-      await page.waitForTimeout(500);
-      await page.locator('button:has-text("Cambiar"), input[value="Cambiar"]').first().click();
-      await page.waitForTimeout(4_000);
-    }
+    // ── Forzar el periodo exacto solicitado (ya no asumimos el default) ────
+    await seleccionarPeriodo(page, period);
 
     await page.locator('text=TOTAL A PAGAR').waitFor({ timeout: 15_000 });
     console.log('[Scraper] Total calculado');
 
     // ── Clic en Pagar → el portal actualiza el contenido en la MISMA URL ────
-    // (confirmado: no navega a otra página, por eso esperamos un marcador de
-    // contenido — "Pago electrónico" — en vez de un cambio de URL).
     let workPage: Page;
     try {
       workPage = await clickAndResolvePage(page, 'Pagar', 'Pago electrónico', 20_000);
