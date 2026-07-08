@@ -42,15 +42,17 @@ export function formatResultMsg(r: ScrapeResult): string {
 }
 
 /**
- * Clic en un locator que puede: (a) navegar la misma página, (b) abrir un
- * popup/pestaña nueva, o (c) disparar un confirm() que ya viene auto-aceptado
- * por el listener de 'dialog' registrado en la página. Devuelve la página
- * "activa" a usar para los pasos siguientes.
+ * Clic en un locator que puede: (a) actualizar el contenido en la MISMA
+ * página vía AJAX/postback (sin cambiar la URL — es el caso real de este
+ * portal), (b) abrir un popup/pestaña nueva, o (c) disparar un confirm() que
+ * ya viene auto-aceptado por el listener de 'dialog' registrado en la
+ * página. En vez de esperar un cambio de URL (que aquí nunca ocurre),
+ * esperamos a que aparezca un texto que solo existe en el contenido nuevo.
  */
 async function clickAndResolvePage(
   page: Page,
   locatorText: string,
-  urlPattern?: string,
+  contentMarker?: string,
   timeout = 20_000
 ): Promise<Page> {
   const ctx = page.context();
@@ -65,8 +67,8 @@ async function clickAndResolvePage(
     return popup;
   }
 
-  if (urlPattern) {
-    await page.waitForURL(urlPattern, { timeout });
+  if (contentMarker) {
+    await page.locator(`text=${contentMarker}`).first().waitFor({ timeout });
   }
   return page;
 }
@@ -140,17 +142,18 @@ export async function procesarPlanilla(income: number, period: Period): Promise<
     await page.locator('text=TOTAL A PAGAR').waitFor({ timeout: 15_000 });
     console.log('[Scraper] Total calculado');
 
-    // ── Clic en Pagar → puede navegar, abrir pestaña, o pasar por un confirm() ──
+    // ── Clic en Pagar → el portal actualiza el contenido en la MISMA URL ────
+    // (confirmado: no navega a otra página, por eso esperamos un marcador de
+    // contenido — "Pago electrónico" — en vez de un cambio de URL).
     let workPage: Page;
     try {
-      workPage = await clickAndResolvePage(page, 'Pagar', '**PagoLiquidacion**', 20_000);
+      workPage = await clickAndResolvePage(page, 'Pagar', 'Pago electrónico', 20_000);
     } catch (e) {
-      // Diagnóstico extra si sigue fallando: URL actual + páginas abiertas
       const openUrls = ctx.pages().map((p) => p.url());
-      console.error('[Scraper] Falló navegación a PagoLiquidacion. URL actual:', page.url(), 'Páginas abiertas:', openUrls);
+      console.error('[Scraper] Falló la carga de la liquidación tras clic en Pagar. URL actual:', page.url(), 'Páginas abiertas:', openUrls);
       throw e;
     }
-    console.log('[Scraper] Página de liquidación cargada:', workPage.url());
+    console.log('[Scraper] Liquidación cargada en:', workPage.url());
 
     // ── Editar ingresos ───────────────────────────────────────────────────
     await workPage.locator('text=Ingresos').first().waitFor({ timeout: 8_000 });
@@ -192,9 +195,14 @@ export async function procesarPlanilla(income: number, period: Period): Promise<
     console.log('[Scraper] Ingresos guardados');
 
     // ── Leer desglose ─────────────────────────────────────────────────────
+    // OJO: etiquetas como "Salud (EPS)", "Pensión (AFP)" y "Caja de
+    // Compensación" aparecen DOS veces en la página: una en "Afiliaciones"
+    // (con el nombre de la entidad) y otra en "Pagos" (con el monto en
+    // pesos). Como "Pagos" está más abajo en el DOM, usamos .last() para
+    // quedarnos con la del monto y no con la del nombre de la entidad.
     async function readAmount(label: string): Promise<number> {
       try {
-        const row = workPage.locator(`text=${label}`).first().locator('..');
+        const row = workPage.locator(`text=${label}`).last().locator('..');
         return parseMoney(await row.textContent());
       } catch { return 0; }
     }
