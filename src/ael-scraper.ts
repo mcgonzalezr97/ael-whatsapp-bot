@@ -51,13 +51,17 @@ export function formatResultMsg(r: ScrapeResult): string {
  * "TE ENCUENTRAS RETIRADO"), pero en la práctica el dashboard puede cargar
  * por defecto un mes distinto al pedido — incluso uno que ya está en
  * "ERROR CALCULANDO TUS APORTES" — así que ahora seleccionamos siempre.
+ *
+ * El ícono real que abre el popup es <i class="fa fa-calendar"> (Font
+ * Awesome), confirmado inspeccionando el DOM real del portal — por eso ya
+ * no dependemos de selectores de <img> ni de otros datepickers genéricos.
  */
 async function seleccionarPeriodo(page: Page, period: Period): Promise<void> {
   console.log(`[Scraper] Seleccionando periodo: ${MES_ABR[period.monthNum - 1]} ${period.year}`);
 
-  // Abrir el popup del selector (ícono de calendario o el texto del mes actual)
+  // Abrir el popup del selector — el ícono real es <i class="fa fa-calendar">
   const abrirSelector = page.locator(
-    'img[src*="cal"], .ui-datepicker-trigger, [id*="calendar"], [id*="Calendar"]'
+    'i.fa-calendar, i[class*="fa-calendar"], img[src*="cal"], .ui-datepicker-trigger, [id*="calendar"], [id*="Calendar"]'
   ).first();
   await abrirSelector.click().catch(async () => {
     await page.locator('text=Selecciona el mes que quieres pagar').first().click();
