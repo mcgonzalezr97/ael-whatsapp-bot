@@ -1,4 +1,4 @@
-import { chromium, Browser } from 'playwright';
+import { chromium, Browser, Page } from 'playwright';
 import { Period } from './types';
 
 const BASE = 'https://independientes.aportesenlinea.com/Portal/Paginas';
@@ -41,6 +41,36 @@ export function formatResultMsg(r: ScrapeResult): string {
   );
 }
 
+/**
+ * Clic en un locator que puede: (a) navegar la misma página, (b) abrir un
+ * popup/pestaña nueva, o (c) disparar un confirm() que ya viene auto-aceptado
+ * por el listener de 'dialog' registrado en la página. Devuelve la página
+ * "activa" a usar para los pasos siguientes.
+ */
+async function clickAndResolvePage(
+  page: Page,
+  locatorText: string,
+  urlPattern?: string,
+  timeout = 20_000
+): Promise<Page> {
+  const ctx = page.context();
+  const popupPromise = ctx.waitForEvent('page', { timeout: 4_000 }).catch(() => null);
+
+  await page.locator(`text=${locatorText}`).first().click();
+
+  const popup = await popupPromise;
+  if (popup) {
+    await popup.waitForLoadState('domcontentloaded', { timeout }).catch(() => {});
+    console.log(`[Scraper] "${locatorText}" abrió una pestaña nueva: ${popup.url()}`);
+    return popup;
+  }
+
+  if (urlPattern) {
+    await page.waitForURL(urlPattern, { timeout });
+  }
+  return page;
+}
+
 export async function procesarPlanilla(income: number, period: Period): Promise<ScrapeResult> {
   const cedula   = process.env.AEL_CEDULA ?? '';
   const password = process.env.AEL_PASSWORD ?? '';
@@ -50,6 +80,7 @@ export async function procesarPlanilla(income: number, period: Period): Promise<
   }
 
   let browser: Browser | null = null;
+  let page: Page;
 
   try {
     console.log('[Scraper] Lanzando Chromium...');
@@ -58,8 +89,23 @@ export async function procesarPlanilla(income: number, period: Period): Promise<
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--single-process'],
     });
 
-    const ctx  = await browser.newContext({ locale: 'es-CO' });
-    const page = await ctx.newPage();
+    const ctx = await browser.newContext({ locale: 'es-CO' });
+    page = await ctx.newPage();
+
+    // ── Auto-aceptar cualquier confirm()/alert() del portal ────────────────
+    // Sin este listener, Playwright descarta (cancela) los diálogos por
+    // defecto, lo que puede bloquear silenciosamente cualquier navegación
+    // que dependa de un "¿Deseas continuar?" tipo confirm().
+    ctx.on('page', (p) => {
+      p.on('dialog', async (dialog) => {
+        console.log(`[Scraper] Dialog (${dialog.type()}): ${dialog.message()}`);
+        await dialog.accept().catch(() => {});
+      });
+    });
+    page.on('dialog', async (dialog) => {
+      console.log(`[Scraper] Dialog (${dialog.type()}): ${dialog.message()}`);
+      await dialog.accept().catch(() => {});
+    });
 
     // ── Login paso 1: cédula ──────────────────────────────────────────────
     console.log('[Scraper] Navegando al login...');
@@ -81,19 +127,12 @@ export async function procesarPlanilla(income: number, period: Period): Promise<
     const retirado = await page.locator('text=TE ENCUENTRAS RETIRADO').count();
     if (retirado > 0) {
       console.log('[Scraper] Estado retirado — corrigiendo mes...');
-      // El calendar picker ya muestra el mes actual — solo confirmar
-      // 1. Clic en el ícono del calendario para abrir el picker
       await page.locator('img[src*="cal"], .ui-datepicker-trigger, [id*="calendar"], [id*="Calendar"]').first().click().catch(async () => {
-        // Fallback: clic en el ícono de calendario junto al campo de fecha
         await page.locator('input:near(:text("Nueva fecha de ingreso")) + img, input:near(:text("Nueva fecha")) ~ img').first().click();
       });
       await page.waitForTimeout(1_000);
-
-      // 2. Clic en "Seleccionar" en el popup del calendario
       await page.locator('button:has-text("Seleccionar"), input[value="Seleccionar"]').first().click();
       await page.waitForTimeout(500);
-
-      // 3. Clic en "Cambiar" para confirmar la nueva fecha
       await page.locator('button:has-text("Cambiar"), input[value="Cambiar"]').first().click();
       await page.waitForTimeout(4_000);
     }
@@ -101,18 +140,25 @@ export async function procesarPlanilla(income: number, period: Period): Promise<
     await page.locator('text=TOTAL A PAGAR').waitFor({ timeout: 15_000 });
     console.log('[Scraper] Total calculado');
 
-    // ── Clic en Pagar ─────────────────────────────────────────────────────
-    await page.locator('text=Pagar').first().click();
-    await page.waitForURL('**PagoLiquidacion**', { timeout: 15_000 });
-    console.log('[Scraper] Página de liquidación cargada');
+    // ── Clic en Pagar → puede navegar, abrir pestaña, o pasar por un confirm() ──
+    let workPage: Page;
+    try {
+      workPage = await clickAndResolvePage(page, 'Pagar', '**PagoLiquidacion**', 20_000);
+    } catch (e) {
+      // Diagnóstico extra si sigue fallando: URL actual + páginas abiertas
+      const openUrls = ctx.pages().map((p) => p.url());
+      console.error('[Scraper] Falló navegación a PagoLiquidacion. URL actual:', page.url(), 'Páginas abiertas:', openUrls);
+      throw e;
+    }
+    console.log('[Scraper] Página de liquidación cargada:', workPage.url());
 
     // ── Editar ingresos ───────────────────────────────────────────────────
-    await page.locator('text=Ingresos').first().waitFor({ timeout: 8_000 });
-    const editarBtns = page.locator('a:has-text("Editar"), button:has-text("Editar")');
+    await workPage.locator('text=Ingresos').first().waitFor({ timeout: 8_000 });
+    const editarBtns = workPage.locator('a:has-text("Editar"), button:has-text("Editar")');
     const count = await editarBtns.count();
     await editarBtns.nth(count - 1).click();
     console.log('[Scraper] Editar ingresos clickeado');
-    await page.waitForTimeout(1_500);
+    await workPage.waitForTimeout(1_500);
 
     // ── Ingresar monto ────────────────────────────────────────────────────
     const inputSelectors = [
@@ -124,7 +170,7 @@ export async function procesarPlanilla(income: number, period: Period): Promise<
 
     let filled = false;
     for (const sel of inputSelectors) {
-      const inp = page.locator(sel).first();
+      const inp = workPage.locator(sel).first();
       if (await inp.count() > 0) {
         await inp.selectText();
         await inp.fill(income.toString());
@@ -137,18 +183,18 @@ export async function procesarPlanilla(income: number, period: Period): Promise<
 
     // Guardar
     for (const sel of ['button:has-text("Guardar")', 'button:has-text("Calcular")', 'button:has-text("Actualizar")', 'input[type="submit"]']) {
-      if (await page.locator(sel).count() > 0) {
-        await page.locator(sel).first().click();
+      if (await workPage.locator(sel).count() > 0) {
+        await workPage.locator(sel).first().click();
         break;
       }
     }
-    await page.waitForTimeout(2_500);
+    await workPage.waitForTimeout(2_500);
     console.log('[Scraper] Ingresos guardados');
 
     // ── Leer desglose ─────────────────────────────────────────────────────
     async function readAmount(label: string): Promise<number> {
       try {
-        const row = page.locator(`text=${label}`).first().locator('..');
+        const row = workPage.locator(`text=${label}`).first().locator('..');
         return parseMoney(await row.textContent());
       } catch { return 0; }
     }
@@ -164,15 +210,15 @@ export async function procesarPlanilla(income: number, period: Period): Promise<
     // ── Pago electrónico → capturar PSE ───────────────────────────────────
     let pseLink = '';
     const newPagePromise = ctx.waitForEvent('page', { timeout: 12_000 }).catch(() => null);
-    await page.locator('text=Pago electrónico').first().click();
+    await workPage.locator('text=Pago electrónico').first().click();
 
     const newTab = await newPagePromise;
     if (newTab) {
       await newTab.waitForLoadState('domcontentloaded', { timeout: 15_000 });
       pseLink = newTab.url();
     } else {
-      await page.waitForTimeout(3_000);
-      pseLink = page.url();
+      await workPage.waitForTimeout(3_000);
+      pseLink = workPage.url();
     }
     console.log('[Scraper] PSE link:', pseLink);
 
